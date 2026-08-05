@@ -1,0 +1,61 @@
+# One command brings up app + database:
+#
+#   docker compose up --build
+#
+# The app is on http://localhost:8080. No credentials are needed - with LLM_API_KEY
+# unset the service runs the deterministic personaliser, so a reviewer gets a
+# working system with an empty environment and can add a key later to see the
+# model path.
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: notifications-db
+    environment:
+      POSTGRES_DB: notifications
+      POSTGRES_USER: notifications
+      POSTGRES_PASSWORD: notifications
+    ports:
+      # Published so the app can also be run from an IDE against this database.
+      - "5432:5432"
+    volumes:
+      - notifications-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1 on purpose: during first-time init the Postgres entrypoint
+      # runs a temporary server on the unix socket only, so a socket-based
+      # pg_isready reports ready before TCP is listening - and the app would then
+      # start, fail to connect, and exit.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U notifications -d notifications"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  app:
+    build: .
+    container_name: notifications-app
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # 'db' is the compose service name, resolved on the compose network.
+      DATABASE_URL: jdbc:postgresql://db:5432/notifications
+      DATABASE_USER: notifications
+      DATABASE_PASSWORD: notifications
+      # Everything below is optional and has a working default. Nothing secret is
+      # committed; a real deployment sets these in the platform's environment.
+      RATE_LIMIT_PER_RECIPIENT: "5"
+      RATE_LIMIT_WINDOW: "60s"
+      # Unset: personalisation falls back to the deterministic render. Pass one
+      # through from your shell to exercise the model path:
+      #   LLM_API_KEY=gsk_... docker compose up --build
+      LLM_API_KEY: "${LLM_API_KEY:-}"
+      # ECS JSON here too, matching the deployed environment - local logs that
+      # look nothing like production logs are how you find out at 3am that your
+      # log queries do not work.
+      LOG_FORMAT: "ecs"
+
+volumes:
+  notifications-pgdata:

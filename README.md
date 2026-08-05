@@ -1,0 +1,230 @@
+# Notification service
+
+Dedupes, rate-limits, and personalises notifications through an LLM — with the
+concurrency correctness in the SQL rather than in application code.
+
+Java 21 · Spring Boot 3.5 · PostgreSQL 16 · Flyway · Testcontainers · Groq
+
+| | |
+|---|---|
+| **Live app** | _(fill in after deploying — see [Deploy](#deploy))_ |
+| **Logs (public)** | _(fill in after connecting Better Stack)_ |
+| **Write-up** | [WRITEUP.md](WRITEUP.md) — data model, concurrency argument, LLM trust boundary |
+
+---
+
+## Run it in one command
+
+Needs Docker. Nothing else — no JDK, no Maven, **no credentials**.
+
+```bash
+docker compose up --build
+```
+
+Open <http://localhost:8080>. With no `LLM_API_KEY` set the service runs the
+deterministic personaliser, so it works fully out of the box; add a key later to
+see the model path.
+
+---
+
+## The two correctness gates
+
+Both scripts run against any URL and **exit non-zero if the invariant breaks**, so
+they work as checks, not just demos.
+
+```bash
+# Gate 1 — 40 concurrent requests, SAME idempotency_key → sent exactly once
+./scripts/burst-dedup.sh
+
+# Gate 2 — 40 concurrent requests, ONE recipient, distinct keys → exactly the limit
+./scripts/burst-ratelimit.sh
+
+# against the deployed service
+BASE_URL=https://your-app.onrender.com ./scripts/burst-dedup.sh
+BASE_URL=https://your-app.onrender.com ./scripts/burst-ratelimit.sh
+```
+
+Actual local output:
+
+```
+GATE 1: dedup under concurrency
+  201 created (a send happened) : 1
+  200 replayed (deduped)        : 39
+  5xx server errors             : 0
+  distinct notification ids     : 1
+  attempts recorded on the notification: 1  (1 = sent once)
+PASS - fired 40 concurrent identical requests, sent exactly once.
+
+GATE 2: rate limit under concurrency (hot recipient)
+  201 admitted      : 5
+  429 rate limited  : 35
+  5xx server errors : 0
+  rate-limit counter reported by the service: used=5 / limit=5
+PASS - 40 concurrent sends to one recipient, exactly 5 admitted, no over-admit, zero 5xx.
+```
+
+---
+
+## API
+
+| | |
+|---|---|
+| `POST /notifications` | Send. **201** sent · **200** deduped replay · **429** rate limited · **409** same key, different body |
+| `GET /notifications/{id}` | Status, personalised body, attempts, created_at |
+| `GET /recipients/{id}/notifications` | Recent notifications + current rate-limit state |
+| `GET /healthz` | Liveness — process only, never touches the DB |
+| `GET /readyz` | Readiness — includes the datastore |
+| `GET /metrics` | Prometheus scrape |
+
+```bash
+curl -X POST localhost:8080/notifications \
+  -H 'Content-Type: application/json' \
+  -d '{"recipient_id":"user-42",
+       "template":"payment_received",
+       "variables":{"name":"Aastha","amount":"INR 2,499.00",
+                    "order_id":"A-1001","receipt_url":"https://example.com/r/1001"},
+       "idempotency_key":"key-001"}'
+```
+
+Templates are a fixed server-side set (`payment_received`, `order_shipped`,
+`payment_failed`, `welcome`) — never caller-supplied, which would be template
+injection.
+
+Rate-limit state is also returned as headers: `X-RateLimit-Limit`,
+`X-RateLimit-Remaining`, `X-RateLimit-Reset`, plus `Retry-After` on a 429. Every
+response carries `X-Correlation-Id`, which is the value to grep the logs by.
+
+---
+
+## How the invariants hold
+
+Both are one SQL statement. No check-then-act, no lock held across a round trip.
+Full reasoning and rejected alternatives in [WRITEUP.md](WRITEUP.md#2-dedup-and-rate-limiting-under-concurrency).
+
+**Dedup** — `INSERT … ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`.
+Row returned = you won the race and own the send; no row = you lost, replay the
+original outcome. Postgres admits exactly one insert out of any burst.
+
+**Rate limit** — a guarded upsert whose `WHERE count < limit` decides admission:
+
+```sql
+INSERT INTO rate_limit_window VALUES (?, ?, 1)
+ON CONFLICT (recipient_id, window_start)
+DO UPDATE SET count = rate_limit_window.count + 1
+WHERE rate_limit_window.count < :limit
+RETURNING count;
+```
+
+Row returned = admitted; no row = 429. Concurrent callers for one recipient
+serialise on a single row for the length of one statement.
+
+**The ordering matters:** claim key → consume budget → *then* personalise. The LLM
+call is outside every lock and transaction, so a slow model costs one request's
+latency and blocks nothing.
+
+---
+
+## The LLM step
+
+The trust boundary is **output validation, not prompt wording**. Facts are
+substituted deterministically *before* the model runs; the model may only rewrite
+tone; its output must still contain every protected value verbatim and introduce
+no new link. A successful prompt injection therefore fails validation and ships
+the deterministic body — the attack becomes a metric, not a wrong message.
+
+Never blocks, drops, or duplicates: 4s timeout, no retry, total interface (never
+throws), and personalisation runs *after* the idempotency claim.
+
+Details: [WRITEUP.md §3](WRITEUP.md#3-the-llm-step--trust-boundary-injection-defence-fallback).
+
+---
+
+## Tests
+
+```bash
+./mvnw test      # 36 unit tests, no Docker needed
+./mvnw verify    # + 5 Testcontainers integration tests (needs Docker)
+```
+
+`mvn verify` is where the two concurrency invariants are proved, against a real
+Postgres over real HTTP, using a `CountDownLatch` starting gate so requests
+genuinely overlap. The assertions read the **database** (`delivery` row counts,
+the counter value), not only the response codes — a bug that returns correct
+statuses while writing two deliveries fails the second check.
+
+CI runs `mvn verify` **and** builds the image on every push.
+
+---
+
+## Deploy
+
+Free tier throughout, ₹0. Deploys the **container image**, not a buildpack.
+
+### 1. Database — Neon
+
+Create a project at [neon.tech](https://neon.tech) and copy the connection string.
+Flyway applies the schema on first boot; there is no manual SQL step.
+
+### 2. App — Render
+
+New → **Web Service** → connect this repo → Runtime **Docker**. Render reads the
+`Dockerfile`. Set these environment variables:
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | `jdbc:postgresql://<neon-host>/<db>?sslmode=require` |
+| `DATABASE_USER` | your Neon user |
+| `DATABASE_PASSWORD` | your Neon password |
+| `LLM_API_KEY` | Groq key from [console.groq.com](https://console.groq.com) (optional) |
+| `LOG_FORMAT` | `ecs` |
+
+> **Note the Neon URL is JDBC-shaped** — Neon gives you
+> `postgresql://user:pass@host/db`; this app takes the host in `DATABASE_URL` and
+> the credentials separately. See [.env.example](.env.example).
+
+> **Render free tier sleeps after ~15 min idle.** The first request after a quiet
+> period is a slow cold start. Hit `/healthz` once before running the gate
+> scripts, or keep it warm with a free cron ping.
+
+### 3. Logs — Better Stack
+
+Create a source, then point Render's log stream at it (Render → service →
+Settings → Log Streams), or run the vector agent. Logs are already ECS JSON on
+stdout with a correlation id per request, so nothing in the app changes. Share the
+dashboard read-only and put the link at the top of this README.
+
+Useful queries once connected:
+
+```
+event:llm_call AND fallback_taken:true     # every time the model was bypassed
+event:notification_rate_limited            # who is getting throttled
+correlation_id:"<id from a response>"      # one request, end to end
+```
+
+---
+
+## Configuration
+
+Everything is env-driven; nothing sensitive is committed. See
+[.env.example](.env.example).
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DATABASE_URL` / `_USER` / `_PASSWORD` | local compose values | |
+| `LLM_API_KEY` | *(empty)* | Empty ⇒ deterministic personaliser. The service is fully functional without it. |
+| `LLM_MODEL` | `llama-3.1-8b-instant` | |
+| `LLM_REQUEST_TIMEOUT` | `4s` | Bounds the whole exchange |
+| `RATE_LIMIT_PER_RECIPIENT` | `5` | |
+| `RATE_LIMIT_WINDOW` | `60s` | |
+| `LOG_FORMAT` | `ecs` | Structured JSON |
+
+---
+
+## If something goes wrong
+
+| Symptom | Cause |
+|---|---|
+| First request to the live URL hangs ~30s | Render free tier cold start. Hit `/healthz` first. |
+| `Could not find a valid Docker environment` in tests | No Docker daemon — use `./mvnw test`. If `docker run hello-world` works, it's the Docker 29 API-version pin (already set in the pom). |
+| Every body is identical to the template | No `LLM_API_KEY` — that's the deterministic fallback working as designed. Check for `llm_call` with `outcome:disabled`. |
+| Gate 2 admits fewer than the limit | The recipient already used budget this window. Both scripts randomise the recipient per run; pass `RECIPIENT=` to override. |

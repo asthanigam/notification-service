@@ -1,0 +1,12 @@
+# Keep the build context small and never ship local state or secrets into a layer.
+target/
+.git/
+.github/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+.env
+scripts/
+docs/
+*.md

@@ -1,0 +1,104 @@
+server:
+  port: ${PORT:8080}
+  # Let in-flight sends finish when a pod is asked to stop rather than cutting
+  # them mid-request. A send that dies between the delivery row and the response
+  # would leave a caller not knowing whether it happened - the idempotency key
+  # makes their retry safe, but not losing the response in the first place is
+  # better.
+  shutdown: graceful
+
+spring:
+  application:
+    name: notification-service
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  datasource:
+    # One URL, 12-factor. Render and Neon both hand you a single connection
+    # string, so taking it whole avoids re-assembling it from parts.
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/notifications}
+    username: ${DATABASE_USER:notifications}
+    password: ${DATABASE_PASSWORD:notifications}
+    hikari:
+      # Free-tier Postgres (Neon) caps connections far lower than a JVM default
+      # pool would happily open. Ten is comfortably under that and still more
+      # than enough: the only thing held across a round trip is a single
+      # statement, never the LLM call.
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      # Fail a request quickly if the pool is exhausted rather than queueing
+      # behind a stall - a fast 500 is easier to reason about than a pile-up.
+      connection-timeout: 5000
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+management:
+  endpoints:
+    web:
+      # Deliberately NOT exposing actuator's own `metrics` endpoint: at this base
+      # path it would claim /metrics itself and win, serving a JSON list of metric
+      # names to anything expecting a Prometheus scrape. Only `prometheus` is
+      # exposed, and it is mapped onto /metrics below.
+      exposure:
+        include: health,info,prometheus
+      # Actuator at the root, so the scrape lands on /metrics - where anything
+      # scraping this will look first. No collision with the application's own
+      # routes (/notifications, /recipients/**, /healthz, /readyz), which are all
+      # explicitly mapped.
+      base-path: /
+      path-mapping:
+        prometheus: metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: notification-service
+    distribution:
+      # Publish the underlying histogram buckets rather than only count/sum/max.
+      # Without this a scrape can report a mean but not a p99, and the mean is
+      # the number that hides exactly the tail everyone cares about.
+      percentiles-histogram:
+        http.server.requests: true
+        llm.latency: true
+      percentiles:
+        http.server.requests: 0.5, 0.95, 0.99
+        llm.latency: 0.5, 0.95, 0.99
+      # Buckets sized for this service: sub-millisecond local reads at one end,
+      # the LLM timeout at the other.
+      minimum-expected-value:
+        http.server.requests: 5ms
+        llm.latency: 10ms
+      maximum-expected-value:
+        http.server.requests: 10s
+        llm.latency: 10s
+
+app:
+  rate-limit:
+    # Five sends per recipient per minute. Small enough that the burst gate is
+    # easy to demonstrate by hand, and both values are env-overridable so a
+    # reviewer can retune the gate without a rebuild.
+    per-recipient: ${RATE_LIMIT_PER_RECIPIENT:5}
+    window: ${RATE_LIMIT_WINDOW:60s}
+  llm:
+    # No default. Empty selects the deterministic personaliser, so the service
+    # runs with an entirely empty environment.
+    api-key: ${LLM_API_KEY:}
+    base-url: ${LLM_BASE_URL:https://api.groq.com/openai/v1/chat/completions}
+    model: ${LLM_MODEL:llama-3.1-8b-instant}
+    connect-timeout: ${LLM_CONNECT_TIMEOUT:2s}
+    # Deliberately tight. This sits inside a request somebody is waiting on and
+    # the fallback is a correct message, so a longer budget trades certain
+    # latency for a nicer rewrite.
+    request-timeout: ${LLM_REQUEST_TIMEOUT:4s}
+    max-tokens: ${LLM_MAX_TOKENS:200}
+
+logging:
+  level:
+    com.example.notifications: INFO
+  # Structured JSON on stdout. Render captures stdout, Better Stack ingests from
+  # there, and every line carries the correlation id from the MDC - which is what
+  # makes one request readable as a story in the shipped logs.
+  structured:
+    format:
+      console: ${LOG_FORMAT:ecs}
