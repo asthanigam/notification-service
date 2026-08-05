@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: Build, test, and build the image
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # `verify` runs the unit tests and the Testcontainers concurrency suite.
+      # GitHub's runners provide a Docker daemon, so the two invariants are
+      # proved against a real Postgres on every push rather than only locally.
+      - name: Build and test
+        run: mvn -B verify
+
+      # The deployable artifact is the image, so CI builds it too - a green test
+      # run against a Dockerfile that cannot build is a false green.
+      - name: Build the container image
+        run: docker build -t notification-service:ci .
+
+      - name: Publish test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            target/surefire-reports/
+            target/failsafe-reports/
+          if-no-files-found: ignore
