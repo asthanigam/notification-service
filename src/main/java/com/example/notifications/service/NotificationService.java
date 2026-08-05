@@ -7,6 +7,7 @@ import com.example.notifications.domain.NotificationStatus;
 import com.example.notifications.llm.Personalizer;
 import com.example.notifications.llm.TemplateRenderer;
 import com.example.notifications.web.ConflictException;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import org.slf4j.Logger;
@@ -76,6 +77,24 @@ public class NotificationService {
     private final Clock clock;
     private final MeterRegistry metrics;
 
+    /**
+     * Counters are resolved once at startup rather than looked up per request.
+     *
+     * <p>The reason is observability, not micro-optimisation. Micrometer creates a
+     * series the first time it is incremented, so a counter that has not fired yet
+     * simply does not appear in a scrape - and on a freshly deployed instance an
+     * operator querying {@code notifications_rate_limited_total} gets an empty
+     * result, which is indistinguishable from a typo in the metric name. Holding
+     * them as fields registers all of them at zero on boot, so a dashboard shows a
+     * real line at zero instead of nothing at all.
+     */
+    private final Counter sentCounter;
+    private final Counter dedupedCounter;
+    private final Counter rateLimitedCounter;
+    private final Counter conflictCounter;
+    private final Counter llmFallbackCounter;
+    private final Timer llmLatency;
+
     public NotificationService(NotificationStore store, RateLimiter rateLimiter,
                                TemplateRenderer renderer, Personalizer personalizer,
                                RequestFingerprint fingerprint, Clock clock,
@@ -87,6 +106,24 @@ public class NotificationService {
         this.fingerprint = fingerprint;
         this.clock = clock;
         this.metrics = metrics;
+
+        this.sentCounter = Counter.builder("notifications.sent")
+                .description("Notifications actually delivered").register(metrics);
+        this.dedupedCounter = Counter.builder("notifications.deduped")
+                .description("Replays of an earlier send, collapsed by idempotency key")
+                .register(metrics);
+        this.rateLimitedCounter = Counter.builder("notifications.rate_limited")
+                .description("Sends refused because the recipient was over their limit")
+                .register(metrics);
+        this.conflictCounter = Counter.builder("notifications.conflict")
+                .description("Idempotency key reused for a different request")
+                .register(metrics);
+        this.llmFallbackCounter = Counter.builder("llm.fallback")
+                .description("Sends delivered from the deterministic template because the "
+                        + "model was slow, failed, or its output was rejected")
+                .register(metrics);
+        this.llmLatency = Timer.builder("llm.latency")
+                .description("Wall-clock time spent in the model call").register(metrics);
     }
 
     public SendOutcome send(String recipientId, String template,
@@ -112,7 +149,7 @@ public class NotificationService {
         if (!decision.admitted()) {
             store.complete(candidateId, NotificationStatus.RATE_LIMITED, null, null,
                     "per-recipient rate limit exceeded", clock.instant());
-            metrics.counter("notifications.rate_limited").increment();
+            rateLimitedCounter.increment();
             Events.of("notification_rate_limited")
                     .with("notification_id", candidateId)
                     .with("recipient_id", recipientId)
@@ -129,10 +166,9 @@ public class NotificationService {
 
         metrics.counter("llm.calls", "outcome", result.outcome()).increment();
         if (result.usedFallback()) {
-            metrics.counter("llm.fallback").increment();
+            llmFallbackCounter.increment();
         }
-        Timer.builder("llm.latency").register(metrics)
-                .record(result.latencyMs(), TimeUnit.MILLISECONDS);
+        llmLatency.record(result.latencyMs(), TimeUnit.MILLISECONDS);
 
         Instant completedAt = clock.instant();
         store.complete(candidateId, NotificationStatus.SENT, result.body(),
@@ -141,7 +177,7 @@ public class NotificationService {
         // the dedup gate counts.
         store.recordDelivery(candidateId, CHANNEL, completedAt);
 
-        metrics.counter("notifications.sent").increment();
+        sentCounter.increment();
         // Two events, not one: the send and the model call are separately
         // interesting. A dashboard filtering event:llm_call can chart fallback
         // rate and latency without also matching every delivery.
@@ -186,7 +222,7 @@ public class NotificationService {
                         "idempotency key claimed but not readable: " + idempotencyKey));
 
         if (!existing.requestFingerprint().equals(requestHash)) {
-            metrics.counter("notifications.conflict").increment();
+            conflictCounter.increment();
             Events.of("notification_conflict")
                     .with("notification_id", existing.id())
                     .with("recipient_id", existing.recipientId())
@@ -197,7 +233,7 @@ public class NotificationService {
 
         Notification settled = awaitTerminal(existing);
 
-        metrics.counter("notifications.deduped").increment();
+        dedupedCounter.increment();
         Events.of("notification_deduped_replay")
                 .with("notification_id", settled.id())
                 .with("recipient_id", settled.recipientId())

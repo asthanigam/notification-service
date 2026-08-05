@@ -148,7 +148,7 @@ This was a fixed-window counter first. Against a managed Postgres the ~150ms
 round trip made a 40-request burst straddle a minute boundary and it admitted
 **8 against a limit of 5** — the `2 x limit` boundary cost, which passed locally
 every time because localhost was too fast to expose it. A bucket has no boundary
-to straddle. [Full story in the write-up](WRITEUP.md#this-was-a-fixed-window-first-and-that-was-a-real-bug).
+to straddle. [Full story in the write-up](WRITEUP.md#2-dedup-and-rate-limiting-under-concurrency).
 
 **The ordering matters:** claim key → consume budget → *then* personalise. The LLM
 call is outside every lock and transaction, so a slow model costs one request's
