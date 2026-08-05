@@ -7,10 +7,30 @@ Java 21 · Spring Boot 3.5 · PostgreSQL 16 · Flyway · Testcontainers · Groq
 
 | | |
 |---|---|
-| **Live app** | _(fill in after deploying — see [Deploy](#deploy))_ |
-| **Logs (public)** | _(fill in after connecting Better Stack)_ |
+| **Live app** | **https://notification-service-1-43ia.onrender.com** |
+| **Logs (public, no login)** | **https://telemetry.betterstack.com/dashboards/hdXBjn** |
+| **Metrics (public)** | [`/metrics`](https://notification-service-1-43ia.onrender.com/metrics) — Prometheus scrape |
 | **Write-up** | [WRITEUP.md](WRITEUP.md) — data model, concurrency argument, LLM trust boundary |
 | **Deploy runbook** | [DEPLOY.md](DEPLOY.md) — Neon, Render, Groq, Better Stack, step by step |
+
+> **Wake it before bursting.** Render's free tier sleeps after ~15 min idle; the
+> first request cold-starts the container (~30s). Hit `/healthz` once and wait for
+> a response before running the gate scripts, or they'll time out and look like a
+> failure that isn't one.
+
+### Verified against the live deployment
+
+```
+GET /readyz  → {"database":"ok","status":"ok"}          Neon reachable from Render
+
+GATE 1  40 concurrent, same idempotency_key
+        → 1x201, 39x200, one id, attempts=1, zero 5xx                    PASS
+GATE 2  40 concurrent, one recipient, distinct keys
+        → exactly 5x201, 35x429, counter used=5/5, zero 5xx              PASS
+
+POST /notifications           → body_source: LLM        Groq live, guard passed
+POST with a link in `name`    → 400 "must not contain a link"  caller-side guard live
+```
 
 ---
 
