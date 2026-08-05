@@ -282,6 +282,17 @@ Events: `notification_sent`, `notification_deduped_replay`,
 the point of shipping logs to a third party is that they leave your
 infrastructure. Ids and outcomes are enough to debug with.
 
+**The app ships its own logs.** Render's log streaming to an external destination
+is a paid feature, so the platform route dead-ends on a free tier. `LogShipper` is
+a logback appender that batches and POSTs to any bearer-token JSON endpoint
+(Better Stack, Axiom). It follows the same rule as the click recorder in the
+previous service — *observability must never be able to hurt the request path*:
+bounded queue, `offer` not `put` so a request thread never blocks on a log
+backend, drops counted and reported, network work on a daemon thread, and every
+failure swallowed rather than thrown back into the logging framework. Unset the
+two variables and no appender is attached at all — no thread, no calls. stdout
+keeps its structured output regardless, so shipping is purely additive.
+
 **Metrics** at `/metrics` (Prometheus): `notifications_sent/deduped/rate_limited/
 conflict_total`, `llm_calls_total{outcome}`, `llm_fallback_total`,
 `llm_latency_seconds`, plus HTTP/JVM/Hikari. Latency is published as **histogram

@@ -178,6 +178,7 @@ New → **Web Service** → connect this repo → Runtime **Docker**. Render rea
 | `DATABASE_PASSWORD` | your Neon password |
 | `LLM_API_KEY` | Groq key from [console.groq.com](https://console.groq.com) (optional) |
 | `LOG_FORMAT` | `ecs` |
+| `LOG_SHIP_URL` / `LOG_SHIP_TOKEN` | Better Stack ingest URL + token (optional) |
 
 > **Note the Neon URL is JDBC-shaped** — Neon gives you
 > `postgresql://user:pass@host/db`; this app takes the host in `DATABASE_URL` and
@@ -189,10 +190,12 @@ New → **Web Service** → connect this repo → Runtime **Docker**. Render rea
 
 ### 3. Logs — Better Stack
 
-Create a source, then point Render's log stream at it (Render → service →
-Settings → Log Streams), or run the vector agent. Logs are already ECS JSON on
-stdout with a correlation id per request, so nothing in the app changes. Share the
-dashboard read-only and put the link at the top of this README.
+Create a source, copy its ingest URL and token, and set `LOG_SHIP_URL` /
+`LOG_SHIP_TOKEN` in Render. The app ships its own logs — Render's log streaming
+to an external destination is a paid feature, and shipping from inside the
+process also carries the MDC through as real fields rather than hoping the
+platform re-parses a line. Unset both and no appender is attached at all.
+Share the source read-only and put the link at the top of this README.
 
 Useful queries once connected:
 

@@ -92,6 +92,17 @@ app:
     # latency for a nicer rewrite.
     request-timeout: ${LLM_REQUEST_TIMEOUT:4s}
     max-tokens: ${LLM_MAX_TOKENS:200}
+  logging:
+    # Ship structured logs to a hosted backend (Better Stack, Axiom, or anything
+    # accepting POST of a JSON array with a bearer token).
+    #
+    # Both empty => no appender is attached at all: no background thread, no
+    # network calls. stdout keeps its structured output either way, so this is
+    # purely additive. The application ships its own logs because Render's log
+    # streaming to an external destination is a paid feature and this has to run
+    # on free tiers.
+    ship-url: ${LOG_SHIP_URL:}
+    ship-token: ${LOG_SHIP_TOKEN:}
 
 logging:
   level:

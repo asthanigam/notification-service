@@ -139,24 +139,39 @@ is working.
 
 ## 4. Better Stack — public logs
 
+> **Render's log streaming to an external destination is a paid feature.** So the
+> app ships its own logs instead — free, works on any host, and it carries the MDC
+> through as real fields rather than hoping the platform re-parses a line back
+> into structure. Verified end to end against a stub backend.
+
 1. [betterstack.com/logs](https://betterstack.com/logs) → sign in → **Sources** →
-   **Connect source**.
-2. Platform: choose **Vector** or **HTTP** — either gives you an ingest token.
-   Copy the **source token** and the ingest host.
-3. In Render: your service → **Settings** → **Log Streams** → add an endpoint
-   pointing at Better Stack.
+   **Connect source** → platform **HTTP**.
+2. Copy the **source token** and the **ingest URL** (something like
+   `https://in.logs.betterstack.com`).
+3. Add two more environment variables in Render:
 
-> If Log Streams isn't available on the free plan, the fallback is to ship from
-> the app instead: add Better Stack's logback appender and a `BETTERSTACK_TOKEN`
-> env var. The app already emits ECS JSON on stdout, so nothing about the log
-> *content* changes either way — only the transport.
+| Key | Value |
+|---|---|
+| `LOG_SHIP_URL` | the ingest URL from Better Stack |
+| `LOG_SHIP_TOKEN` | the source token |
 
-4. **Share it read-only:** Better Stack → the dashboard/source view → **Share** →
-   create a public link. Put that link at the top of `README.md`.
+Render redeploys. Confirm it took by looking for this line in Render's own log
+tab — the host is logged, the token never is:
+
+```
+Log shipping enabled endpoint_host=in.logs.betterstack.com
+```
+
+If the variables are unset, no appender is attached at all: no background thread,
+no network calls, and stdout keeps its structured output. Shipping is purely
+additive and can never take the service down.
+
+4. **Share it read-only:** Better Stack → the source's live-tail or a dashboard →
+   **Share** → create a public link. Put that link at the top of `README.md`.
 
 ### Queries worth putting in the shared view
 
-Because events are emitted as real fields rather than sentences, these are
+Because events are shipped as real fields rather than sentences, these are
 filters, not regexes:
 
 ```
@@ -168,8 +183,6 @@ correlation_id:"<id from any response>"     # one request, end to end
 
 Every HTTP response carries `X-Correlation-Id`, so that last query is how you go
 from "this request looked wrong" to the exact log lines in one step.
-
----
 
 ## 5. Fill in the three links
 
