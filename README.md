@@ -10,6 +10,7 @@ Java 21 · Spring Boot 3.5 · PostgreSQL 16 · Flyway · Testcontainers · Groq
 | **Live app** | _(fill in after deploying — see [Deploy](#deploy))_ |
 | **Logs (public)** | _(fill in after connecting Better Stack)_ |
 | **Write-up** | [WRITEUP.md](WRITEUP.md) — data model, concurrency argument, LLM trust boundary |
+| **Deploy runbook** | [DEPLOY.md](DEPLOY.md) — Neon, Render, Groq, Better Stack, step by step |
 
 ---
 
