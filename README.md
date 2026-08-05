@@ -13,10 +13,13 @@ Java 21 · Spring Boot 3.5 · PostgreSQL 16 · Flyway · Testcontainers · Groq
 | **Write-up** | [WRITEUP.md](WRITEUP.md) — data model, concurrency argument, LLM trust boundary |
 | **Deploy runbook** | [DEPLOY.md](DEPLOY.md) — Neon, Render, Groq, Better Stack, step by step |
 
-> **Wake it before bursting.** Render's free tier sleeps after ~15 min idle; the
-> first request cold-starts the container (~30s). Hit `/healthz` once and wait for
-> a response before running the gate scripts, or they'll time out and look like a
-> failure that isn't one.
+> **Cold starts are handled for you.** Render's free tier sleeps after ~15 min
+> idle and the next request pays a ~30s cold start. Both burst scripts wait for
+> `/healthz` to answer before they measure anything (bounded at 120s), so a
+> sleeping service reads as a slow start rather than a failed gate. A scheduled
+> GitHub Action also pings every 10 minutes to keep it warm — best-effort, since
+> GitHub's scheduler can run late, which is exactly why the scripts do not rely
+> on it.
 
 ### Verified against the live deployment
 
@@ -126,18 +129,26 @@ Full reasoning and rejected alternatives in [WRITEUP.md](WRITEUP.md#2-dedup-and-
 Row returned = you won the race and own the send; no row = you lost, replay the
 original outcome. Postgres admits exactly one insert out of any burst.
 
-**Rate limit** — a guarded upsert whose `WHERE count < limit` decides admission:
+**Rate limit** — a token bucket, refilled and consumed in one guarded upsert:
 
 ```sql
-INSERT INTO rate_limit_window VALUES (?, ?, 1)
-ON CONFLICT (recipient_id, window_start)
-DO UPDATE SET count = rate_limit_window.count + 1
-WHERE rate_limit_window.count < :limit
-RETURNING count;
+INSERT INTO rate_limit_bucket AS b (recipient_id, tokens, updated_at)
+VALUES (?, capacity - 1, now)
+ON CONFLICT (recipient_id) DO UPDATE
+   SET tokens = LEAST(capacity, b.tokens + elapsed_seconds * refill_rate) - 1,
+       updated_at = now
+ WHERE LEAST(capacity, b.tokens + elapsed_seconds * refill_rate) >= 1
+RETURNING tokens;
 ```
 
 Row returned = admitted; no row = 429. Concurrent callers for one recipient
 serialise on a single row for the length of one statement.
+
+This was a fixed-window counter first. Against a managed Postgres the ~150ms
+round trip made a 40-request burst straddle a minute boundary and it admitted
+**8 against a limit of 5** — the `2 x limit` boundary cost, which passed locally
+every time because localhost was too fast to expose it. A bucket has no boundary
+to straddle. [Full story in the write-up](WRITEUP.md#this-was-a-fixed-window-first-and-that-was-a-real-bug).
 
 **The ordering matters:** claim key → consume budget → *then* personalise. The LLM
 call is outside every lock and transaction, so a slow model costs one request's
@@ -163,7 +174,7 @@ Details: [WRITEUP.md §3](WRITEUP.md#3-the-llm-step--trust-boundary-injection-de
 ## Tests
 
 ```bash
-./mvnw test      # 36 unit tests, no Docker needed
+./mvnw test      # 39 unit tests, no Docker needed
 ./mvnw verify    # + 5 Testcontainers integration tests (needs Docker)
 ```
 

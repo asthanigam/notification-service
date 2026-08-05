@@ -1,0 +1,56 @@
+name: Keep warm
+
+# Render's free tier stops the container after ~15 minutes idle, and the next
+# request pays a ~30s cold start. That is fine for a hobby service and bad for a
+# link somebody else is going to open once, form an impression from, and close.
+#
+# So: ping it on a schedule. GitHub Actions rather than a third-party uptime
+# service specifically because it needs no new account - the repo already exists,
+# and scheduled workflows are free on public repos.
+#
+# Two honest caveats:
+#   * GitHub's scheduler is best-effort and can run late under load, so the
+#     service may still occasionally be cold. The burst scripts wake it
+#     themselves for exactly that reason - this reduces the odds, it does not
+#     remove the need.
+#   * GitHub disables scheduled workflows on repos with no activity for 60 days.
+on:
+  schedule:
+    # Every 10 minutes: comfortably inside the ~15 minute idle timeout even if a
+    # run is skipped or delayed.
+    - cron: '*/10 * * * *'
+  # So it can be triggered by hand right before sending the link to someone.
+  workflow_dispatch:
+
+# Never let two pings overlap if one is slow.
+concurrency:
+  group: keep-warm
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    name: Ping /healthz
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Wake the service
+        run: |
+          URL="https://notification-service-1-43ia.onrender.com/healthz"
+          # --max-time 90 because a genuine cold start legitimately takes ~30s and
+          # this step failing on a slow wake-up would be a false alarm, not a
+          # signal. Retries cover the case where the container is mid-start and
+          # briefly refuses the connection.
+          for attempt in 1 2 3; do
+            if curl -fsS --max-time 90 "$URL"; then
+              echo ""
+              echo "awake (attempt $attempt)"
+              exit 0
+            fi
+            echo "attempt $attempt did not answer; retrying"
+            sleep 15
+          done
+          # Deliberately not `exit 1`. This workflow is a courtesy that keeps a
+          # demo responsive; it is not a monitor, and a red X on the repo would
+          # imply the service is broken when it may simply have been slow to
+          # wake. Real health signals live at /readyz and /metrics.
+          echo "::warning::Service did not respond; it may be cold or down. Check /readyz."

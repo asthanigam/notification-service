@@ -31,6 +31,36 @@ PAYLOAD=$(cat <<JSON
 JSON
 )
 
+# --- wake the service before measuring anything -------------------------------
+# Render's free tier sleeps after ~15 minutes idle. Firing 40 concurrent requests
+# at a sleeping instance means the first few absorb a ~30s cold start, time out,
+# and the script reports a failure that is really just a platform waking up.
+#
+# So the script waits for the service to answer before it starts. This is not a
+# courtesy - a benchmark that cannot tell "wrong" from "asleep" is not a
+# measurement, and the person running it has no reason to know the difference.
+# Bounded on wall clock, not on attempt count: a host that black-holes packets
+# would make each curl burn its full --max-time, so "40 attempts" could mean
+# twelve minutes. A deadline says what is actually meant - wait up to two
+# minutes, then get on with it.
+warmup() {
+  local deadline=$(( $(date +%s) + 120 ))
+  printf '  waking %s ' "$BASE_URL"
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if curl -sS -o /dev/null --max-time 10 "$BASE_URL/healthz" 2>/dev/null; then
+      printf ' awake\n\n'
+      return 0
+    fi
+    printf '.'
+    sleep 3
+  done
+  printf '\n'
+  echo "  WARNING: no response within 120s; running anyway." >&2
+  echo "  A failure below means the service is down rather than merely asleep." >&2
+  echo >&2
+}
+warmup
+
 echo "GATE 1: dedup under concurrency"
 echo "  target      : $BASE_URL"
 echo "  concurrency : $CONCURRENCY  (all sharing one idempotency_key)"
