@@ -104,10 +104,22 @@ prove the catch block compiles.
 
 ## 4. Scale and degradation
 
+**Measured on the live free tier:** 30 concurrent sends across 10 recipients →
+30/30 admitted, zero 5xx, p50 4.6s / p95 5.6s end-to-end. That latency is
+*deliberate but not free*: it is the inline model call plus a 0.1-CPU Render
+instance plus cross-region Neon round trips. The fix is not a faster model, it is
+making the send asynchronous — enqueue after the idempotency claim and personalise
+off the request path, which turns LLM latency from *bounded* into *invisible*. I
+did not build it because the brief asks for a synchronous `POST` that returns the
+body, and inventing an async contract to flatter a latency number would be
+answering a different question.
+
 Contention is already per-recipient — one row — so recipients never block each other.
 Next, gated on signal: Redis for the counter; shard on `recipient_id` (both tables
-already key on it); then async sends, which makes LLM latency invisible rather than
-merely bounded.
+already key on it); then async sends as above. Note the connection pool is *not*
+held across the model call — claim and rate-limit each take a connection and give
+it straight back — which is why 40 concurrent requests survive a pool of 10 with
+zero 5xx rather than exhausting it.
 
 **If the LLM degrades:** already handled — timeout → deterministic body,
 `llm.fallback` climbs, sends keep working with worse prose. `body_source` is a

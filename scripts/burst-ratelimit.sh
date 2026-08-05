@@ -71,7 +71,12 @@ fire() {
  "idempotency_key":"burst-$RECIPIENT-$i"}
 JSON
 )
-  curl -sS -o "$WORK/body.$i" -w '%{http_code}' \
+  # --max-time so a hung service fails loudly rather than hanging this script
+  # forever. 120s is far above the observed p95 (~6s under a 40-way burst on a
+  # 0.1-CPU free instance), so it cannot cause a false failure; a request that
+  # exceeds it is a real problem, and curl reports 000, which counts as "other"
+  # and fails the gate.
+  curl -sS --max-time 120 -o "$WORK/body.$i" -w '%{http_code}' \
        -X POST "$BASE_URL/notifications" \
        -H 'Content-Type: application/json' \
        --data-binary "$payload" > "$WORK/code.$i" 2>"$WORK/err.$i"
