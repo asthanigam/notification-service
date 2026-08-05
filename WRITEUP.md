@@ -12,7 +12,7 @@ Three tables, two of which exist to make an invariant checkable from outside.
 | Table | Purpose | The constraint that matters |
 |---|---|---|
 | `notification` | The request and its outcome; doubles as the idempotency ledger | `UNIQUE (idempotency_key)` |
-| `rate_limit_window` | One counter row per (recipient, fixed window) | `PRIMARY KEY (recipient_id, window_start)` |
+| `rate_limit_bucket` | One token bucket per recipient | `PRIMARY KEY (recipient_id)` |
 | `delivery` | Append-only proof a send happened | `UNIQUE (notification_id)` |
 
 Two deliberate choices:
@@ -244,9 +244,10 @@ every build.**
 | `replayReturnsTheOriginalOutcomeUnchanged` | Same body, `attempts` not incremented |
 | `rateLimitIsPerRecipientNotGlobal` | Recipients don't contend with each other |
 
-Plus 36 unit tests, including the guard tested **from the attacker's side** —
+Plus 39 unit tests, including the guard tested **from the attacker's side** —
 swapped link, injected link, changed amount, model obeying an injected
-instruction.
+instruction — and the caller-side link rejection that the live injection
+attempt exposed.
 
 **Live gates:** `./scripts/burst-dedup.sh` and `./scripts/burst-ratelimit.sh` run
 the same two invariants against any URL and exit non-zero on violation.
