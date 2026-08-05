@@ -5,16 +5,27 @@
 FROM maven:3.9-eclipse-temurin-21 AS build
 WORKDIR /build
 
+# Bound the build JVM. Free-tier builders are memory-constrained and Maven will
+# happily size its heap against the host's total RAM rather than the container's
+# limit, which is a well-known way to get OOM-killed mid-build on exactly this
+# kind of infrastructure. Cheap insurance: this build needs nowhere near 512m.
+ENV MAVEN_OPTS="-Xmx512m -XX:MaxMetaspaceSize=256m"
+
 # Dependencies resolve in their own layer, keyed on the pom alone, so editing a
 # Java file does not re-download the internet.
+#
+# --no-transfer-progress on both steps: the default emits a progress line per
+# artifact, which is thousands of lines of noise that a hosted builder has to
+# capture and stream. It buys nothing in a non-interactive build and makes a real
+# error harder to find in the log.
 COPY pom.xml ./
-RUN mvn -B -q dependency:go-offline
+RUN mvn -B -q --no-transfer-progress dependency:go-offline
 
 COPY src ./src
 # Tests are skipped here deliberately: the integration suite needs its own Docker
 # daemon, and docker-in-docker during an image build is a bad trade. `mvn verify`
 # on a developer machine and in CI is where tests run - and CI gates the deploy.
-RUN mvn -B -q -DskipTests package
+RUN mvn -B -q --no-transfer-progress -DskipTests package
 
 # JRE, not JDK: no compiler, no jlink, no javac in production.
 FROM eclipse-temurin:21-jre-alpine
