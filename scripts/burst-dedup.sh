@@ -31,14 +31,18 @@ PAYLOAD=$(cat <<JSON
 JSON
 )
 
-# --- wake the service before measuring anything -------------------------------
-# Render's free tier sleeps after ~15 minutes idle. Firing 40 concurrent requests
-# at a sleeping instance means the first few absorb a ~30s cold start, time out,
-# and the script reports a failure that is really just a platform waking up.
+# --- wait for READINESS before measuring anything ------------------------------
+# Render's free tier sleeps after ~15 minutes idle, and a deploy swaps instances.
+# Firing 40 concurrent requests at a starting instance produces a wall of 5xx and
+# the script reports a failure that is really a platform still coming up.
 #
-# So the script waits for the service to answer before it starts. This is not a
-# courtesy - a benchmark that cannot tell "wrong" from "asleep" is not a
-# measurement, and the person running it has no reason to know the difference.
+# This polls /readyz, not /healthz, and that distinction is the whole point.
+# /healthz answers as soon as the process is alive - which on this service is
+# before the connection pool has reached the database, so a burst launched on a
+# healthz-only signal still gets 5xx. /readyz is the endpoint that says the
+# datastore is actually reachable, so it is the only honest gate to start from.
+# (Learned by running it: a burst fired during a deploy swap returned 40 server
+# errors against a service that was completely fine thirty seconds later.)
 # Bounded on wall clock, not on attempt count: a host that black-holes packets
 # would make each curl burn its full --max-time, so "40 attempts" could mean
 # twelve minutes. A deadline says what is actually meant - wait up to two
@@ -47,7 +51,9 @@ warmup() {
   local deadline=$(( $(date +%s) + 120 ))
   printf '  waking %s ' "$BASE_URL"
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    if curl -sS -o /dev/null --max-time 10 "$BASE_URL/healthz" 2>/dev/null; then
+    # Requires the body to actually report the database as ok - a 200 with
+    # {"status":"unavailable"} is a readiness failure, not readiness.
+    if curl -sS --max-time 10 "$BASE_URL/readyz" 2>/dev/null | grep -q '"database":"ok"'; then
       printf ' awake\n\n'
       return 0
     fi
