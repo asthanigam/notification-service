@@ -62,21 +62,53 @@ client retrying a timeout while the first attempt is still running — into the
 right answer rather than an ambiguous one. Past the cap it returns the honest
 `PENDING` row, which is still not a second send.
 
-### Rate limiting — atomic guarded upsert
+### Rate limiting — token bucket via an atomic guarded upsert
 
 ```sql
-INSERT INTO rate_limit_window (recipient_id, window_start, count) VALUES (?, ?, 1)
-ON CONFLICT (recipient_id, window_start)
-DO UPDATE SET count = rate_limit_window.count + 1
-WHERE rate_limit_window.count < :limit
-RETURNING count;
+INSERT INTO rate_limit_bucket AS b (recipient_id, tokens, updated_at)
+VALUES (?, capacity - 1, now)
+ON CONFLICT (recipient_id) DO UPDATE
+   SET tokens = LEAST(capacity, b.tokens + elapsed_seconds * refill_rate) - 1,
+       updated_at = now
+ WHERE LEAST(capacity, b.tokens + elapsed_seconds * refill_rate) >= 1
+RETURNING tokens;
 ```
 
-Row returned → admitted. No row → the `WHERE` guard refused the increment → 429.
-Postgres holds a row lock for the duration of the `ON CONFLICT DO UPDATE`, so
-concurrent callers for one recipient serialise on that single row. **That is the
-hot-recipient case working as designed, not in spite of it**: contention is one
-row wide, the lock lasts one statement, and nothing slow happens while it's held.
+Refill and consume happen in the *same* statement, so application code never
+holds a stale token count. Row returned → admitted. No row → the guard found the
+refilled bucket empty → 429. Postgres holds a row lock for the duration of the
+`ON CONFLICT DO UPDATE`, so concurrent callers for one recipient serialise on that
+single row. **That is the hot-recipient case working as designed, not in spite of
+it**: contention is one row wide, the lock lasts one statement, and nothing slow
+happens while it's held.
+
+Refill is lazy — derived from the gap since `updated_at` whenever the row is next
+touched — so there is no background job and an idle recipient costs nothing.
+
+### This was a fixed window first, and that was a real bug
+
+Worth reading, because it is the one thing here I got wrong and caught by
+attacking my own service rather than by reasoning.
+
+The original limiter was a fixed-window counter. Its known cost was that a caller
+could land up to `2 × limit` across a window boundary, and I wrote that down as
+"bounded, documented, and the upgrade path understood — not discovered later."
+
+Then I ran the burst against a *managed* Postgres instead of a local one. Round
+trips went from ~1ms to ~150ms, the 40-request burst got slow enough to straddle a
+minute boundary, and it admitted **8 against a limit of 5** — filling the end of
+one window and the start of the next. Locally it had passed every time.
+
+Two things I'd keep from that:
+
+- **Latency is what made a documented weakness reachable.** The flaw was never
+  hypothetical; my test environment was just too fast to expose it.
+- **A documented cost is still a bug if it violates the requirement.** The brief
+  asks that a burst never admit more than the limit. "Known and written down" does
+  not make `2 × limit` acceptable — it just meant I'd have failed the gate with an
+  explanation ready.
+
+A bucket has no boundary to straddle, so the guarantee holds at every instant.
 
 ### Why these, and what I rejected
 
@@ -86,7 +118,8 @@ row wide, the lock lasts one statement, and nothing slow happens while it's held
 | `SELECT … FOR UPDATE` then `UPDATE` | Correct, but holds a row lock across a round trip and invites someone to put slow work (the LLM call) inside the critical section. |
 | Optimistic version + retry loop | Works, but under a hot-recipient burst *every* contender retries, converting contention into retry storms. The guarded upsert has one contender win per attempt with no application retry at all. |
 | Redis `INCR` + `EXPIRE` | Genuinely the right answer at scale, and where I'd go next. Rejected here because it adds a second datastore to keep alive on a free tier and moves admission truth out of the database that must already be up for a send to succeed. |
-| Sliding window / token bucket | Strictly better limiters, strictly more to get right. See the cost below. |
+| Fixed-window counter | What this was first. One row, one statement, but admits up to `2 × limit` across a window boundary — which is not theoretical; see below. |
+| Sliding-window log (row per send, count within the window) | Exact, but correct-under-concurrency needs explicit locking or a CTE that isn't actually serialisable: two transactions read the same snapshot, both count 4, both insert. The lost update wearing a different hat. |
 
 **Fixed window's honest cost:** a caller can land up to `2 × limit` across a
 window boundary. That's the price of one row and one statement. Bounded,

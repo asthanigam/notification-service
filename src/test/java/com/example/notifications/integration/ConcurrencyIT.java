@@ -225,12 +225,19 @@ class ConcurrencyIT {
                     .isEqualTo(limit);
             assertThat(rejected.get()).isEqualTo(threads - limit);
 
-            // The counter itself must agree. A limiter that returned the right
-            // statuses while losing increments would pass the check above.
-            Integer counted = jdbc.queryForObject(
-                    "SELECT count FROM rate_limit_window WHERE recipient_id = ?",
-                    Integer.class, recipient);
-            assertThat(counted).as("no lost counts").isEqualTo(limit);
+            // The bucket itself must agree. A limiter that returned the right
+            // statuses while losing decrements would pass the check above.
+            // Compared with a tolerance because refill is continuous: a burst
+            // taking a second legitimately accrues a fraction of a token, and
+            // asserting exact equality would make this test fail on a slow day
+            // for a reason that is not a bug.
+            Double tokensLeft = jdbc.queryForObject(
+                    "SELECT tokens FROM rate_limit_bucket WHERE recipient_id = ?",
+                    Double.class, recipient);
+            assertThat(tokensLeft)
+                    .as("bucket drained to empty - no lost decrements")
+                    .isNotNull()
+                    .isLessThan(1.0);
 
             // And the durable record must match: exactly `limit` deliveries.
             Integer deliveries = jdbc.queryForObject("""
