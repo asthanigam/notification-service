@@ -10,6 +10,7 @@ Java 21 · Spring Boot 3.5 · PostgreSQL 16 · Flyway · Testcontainers · Groq
 | **Live app** | **https://notification-service-1-43ia.onrender.com** |
 | **Logs (public, no login)** | **https://telemetry.betterstack.com/dashboards/hdXBjn** |
 | **Metrics (public)** | [`/metrics`](https://notification-service-1-43ia.onrender.com/metrics) — Prometheus scrape |
+| **Walkthrough** | [DEMO.md](DEMO.md) — every way to run it, and what each step demonstrates |
 | **Write-up** | [WRITEUP.md](WRITEUP.md) — data model, concurrency argument, LLM trust boundary |
 | **Deploy runbook** | [DEPLOY.md](DEPLOY.md) — Neon, Render, Groq, Better Stack, step by step |
 
@@ -61,7 +62,11 @@ rejection, both concurrency gates, then metrics:
 BASE_URL=https://notification-service-1-43ia.onrender.com ./scripts/demo.sh
 ```
 
-`AUTO=1` skips the pauses for a dry run.
+`AUTO=1` skips the pauses for a dry run — which is also the quickest way to warm
+the service before showing it to anyone.
+
+Each step, what it demonstrates, the local-only and test-only paths, and a
+troubleshooting table are in **[DEMO.md](DEMO.md)**.
 
 ---
 
