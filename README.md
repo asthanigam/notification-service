@@ -51,6 +51,20 @@ see the model path.
 
 ---
 
+## Live demo
+
+One command walks the whole story with pauses between beats — readiness, an
+LLM-personalised send, the idempotent replay, the 409, the prompt-injection
+rejection, both concurrency gates, then metrics:
+
+```bash
+BASE_URL=https://notification-service-1-43ia.onrender.com ./scripts/demo.sh
+```
+
+`AUTO=1` skips the pauses for a dry run.
+
+---
+
 ## The two correctness gates
 
 Both scripts run against any URL and **exit non-zero if the invariant breaks**, so
