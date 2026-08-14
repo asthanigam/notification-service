@@ -25,7 +25,16 @@ import java.util.regex.Pattern;
 @Component
 public class TemplateRenderer {
 
-    private static final Pattern PLACEHOLDER = Pattern.compile("\\{\\{\\s*(\\w+)\\s*}}");
+    private static final Pattern PLACEHOLDER = Pattern.compile("\\{\\{(\\w+)}}");
+
+    /**
+     * Optional blocks: {@code {{?key: literal text with {{key}} inside}}}. The
+     * entire block is included only when the caller supplies the named variable;
+     * otherwise it vanishes, so existing callers that omit the variable see the
+     * same message they always did.
+     */
+    private static final Pattern OPTIONAL_BLOCK =
+            Pattern.compile("\\{\\{\\?(\\w+):\\s*(.*?\\{\\{\\1\\}\\}.*?)\\}\\}");
 
     /**
      * Matches anything a mail client or a human would treat as a link. Kept
@@ -34,6 +43,21 @@ public class TemplateRenderer {
      */
     private static final Pattern URL_LIKE = Pattern.compile(
             "(?i)(https?://|www\\.|\\b[a-z0-9-]+\\.(com|net|org|io|co|xyz|link|click|ru|top)\\b)");
+
+    private static final Pattern MERCHANT_NAME_PATTERN =
+            Pattern.compile("^[\\p{L}\\p{N} .,'&\\-]{1,100}$");
+    private static final Pattern CARD_LAST4_PATTERN = Pattern.compile("^\\d{4}$");
+
+    /**
+     * Format constraints on specific variable names. Applied regardless of which
+     * template uses them, so a new template that includes {@code card_last4} gets
+     * the same validation without the author having to remember.
+     */
+    private static final Map<String, FormatRule> FORMAT_RULES = Map.of(
+            "merchant_name", new FormatRule(MERCHANT_NAME_PATTERN,
+                    "must contain only letters, digits, spaces, and common punctuation (.,'-&)"),
+            "card_last4", new FormatRule(CARD_LAST4_PATTERN,
+                    "must be exactly 4 digits"));
 
     /**
      * Placeholders whose values are allowed to be links. Everything else is
@@ -54,8 +78,10 @@ public class TemplateRenderer {
     private static final Map<String, Template> TEMPLATES = Map.of(
             "payment_received", new Template(
                     "payment_received",
-                    "Hi {{name}}, we received your payment of {{amount}} for order {{order_id}}. "
-                            + "View your receipt at {{receipt_url}}."),
+                    "Hi {{name}}, we received your payment of {{amount}} for order {{order_id}}"
+                            + "{{?merchant_name: at {{merchant_name}}}}"
+                            + "{{?card_last4: (card ending {{card_last4}})}}"
+                            + ". View your receipt at {{receipt_url}}."),
             "order_shipped", new Template(
                     "order_shipped",
                     "Hi {{name}}, order {{order_id}} has shipped and should arrive by {{eta}}. "
@@ -84,10 +110,13 @@ public class TemplateRenderer {
      * substituted values. A value containing {@code {{other}}} is inert text, so a
      * caller cannot use one variable to reach a second substitution pass.
      *
-     * @throws IllegalArgumentException if the template is unknown or a placeholder
-     *                                  has no value; failing loudly beats
-     *                                  delivering a message with a literal
-     *                                  {@code {{amount}}} in it
+     * <p>Optional blocks ({@code {{?key: text {{key}}}}}) are resolved first:
+     * included when the variable is present, removed when absent. This makes new
+     * fields backward compatible - existing callers that omit them see the same
+     * message they always did.
+     *
+     * @throws IllegalArgumentException if the template is unknown or a required
+     *                                  placeholder has no value
      */
     public Rendered render(String templateName, Map<String, String> variables) {
         Template template = TEMPLATES.get(templateName);
@@ -95,9 +124,11 @@ public class TemplateRenderer {
             throw new IllegalArgumentException("unknown template: " + templateName);
         }
 
+        String body = resolveOptionalBlocks(template.body(), variables);
+
         Map<String, String> used = new LinkedHashMap<>();
         StringBuilder out = new StringBuilder();
-        Matcher m = PLACEHOLDER.matcher(template.body());
+        Matcher m = PLACEHOLDER.matcher(body);
         while (m.find()) {
             String key = m.group(1);
             String value = variables.get(key);
@@ -106,12 +137,38 @@ public class TemplateRenderer {
                         "missing variable '" + key + "' for template '" + templateName + "'");
             }
             rejectLinkInProseField(key, value);
+            validateFormat(key, value);
             used.put(key, value);
             m.appendReplacement(out, Matcher.quoteReplacement(value));
         }
         m.appendTail(out);
 
         return new Rendered(out.toString(), used);
+    }
+
+    /**
+     * Resolves optional blocks before placeholder substitution. A block
+     * {@code {{?key: text with {{key}}}}} is expanded to its inner text when the
+     * variable is supplied, or removed entirely when it is absent. Format
+     * validation runs here too, so a malformed optional value is caught even
+     * though the placeholder is not required.
+     */
+    private String resolveOptionalBlocks(String body, Map<String, String> variables) {
+        Matcher m = OPTIONAL_BLOCK.matcher(body);
+        StringBuilder out = new StringBuilder();
+        while (m.find()) {
+            String key = m.group(1);
+            String value = variables.get(key);
+            if (value != null) {
+                rejectLinkInProseField(key, value);
+                validateFormat(key, value);
+                m.appendReplacement(out, Matcher.quoteReplacement(m.group(2)));
+            } else {
+                m.appendReplacement(out, "");
+            }
+        }
+        m.appendTail(out);
+        return out.toString();
     }
 
     /**
@@ -144,7 +201,18 @@ public class TemplateRenderer {
         }
     }
 
+    private static void validateFormat(String key, String value) {
+        FormatRule rule = FORMAT_RULES.get(key);
+        if (rule != null && !rule.pattern.matcher(value).matches()) {
+            throw new IllegalArgumentException(
+                    "variable '" + key + "' " + rule.message);
+        }
+    }
+
     private record Template(String name, String body) {
+    }
+
+    private record FormatRule(Pattern pattern, String message) {
     }
 
     /**
